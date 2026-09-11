@@ -308,7 +308,7 @@ function kitAvailable(kit) {
 }
 /* Lucro de uma venda: o "frete a contratar" (s.freight) é repassado a terceiros e NÃO entra no lucro;
    a "nossa entrega" (s.ownFreight) é receita da empresa e entra no lucro. */
-function saleProfit(s) { return saleProfit(s) - num(s.freight); }
+function saleProfit(s) { return num(s.total) - num(s.cost) - num(s.freight); }
 function margin(p) {
   const price = num(p.promo) || num(p.price);
   const cost = num(p.avgCost);
