@@ -265,6 +265,7 @@ const VIEWS = {
   perfil: ["Perfil", viewPerfil], config: ["Configurações", viewConfig],
   logs: ["Log de operações", viewLogs]
 };
+let _mountedView = null;
 function renderView() {
   applySettingsUI();
   const v = VIEWS[STATE.view] ? STATE.view : "dashboard";
@@ -272,7 +273,15 @@ function renderView() {
   const [title, fn] = VIEWS[STATE.view];
   $("#viewTitle").textContent = title;
   $$("#nav .nav-item").forEach(b => b.classList.toggle("active", b.dataset.view === STATE.view));
+  // Mensagens/Chat: atualiza no lugar. Recriar o HTML a cada mudança do banco
+  // destruía o chat aberto (perdia o texto digitado, o foco e remontava o listener).
+  if (STATE.view === "mensagens" && _mountedView === "mensagens" && $("#msgBody")) {
+    const modalOpen = !$("#modalBackdrop")?.classList.contains("hidden");
+    if (!modalOpen) renderMensagensBody();
+    return;
+  }
   $("#content").innerHTML = "";
+  _mountedView = STATE.view;
   fn($("#content"));
 }
 
@@ -2657,6 +2666,7 @@ function msgClear() {
   MSG.unsubs = [];
   if (MSG.msgUnsub) { try { MSG.msgUnsub(); } catch (e) {} MSG.msgUnsub = null; }
   MSG.mail = {}; MSG.chats = {}; MSG.presence = {}; MSG.msgs = {}; MSG.chatId = null; MSG._mounted = null;
+  MSG._draftText = {}; MSG._seenWrite = {};
 }
 
 function myName(u = STATE.profile, email = STATE.user?.email) {
@@ -2974,11 +2984,15 @@ async function openDirectChat(otherUid) {
   const found = list(MSG.chats).find(c => c.type === "direct" && (c.members || {})[uid] && (c.members || {})[otherUid]);
   let id = found?.id;
   if (!id) {
-    const r = await push(ref(db, "chats"), {
+    const novo = {
       type: "direct", members: { [uid]: true, [otherUid]: true },
       createdBy: uid, createdAt: Date.now(), lastAt: Date.now(), lastText: ""
-    });
+    };
+    const r = await push(ref(db, "chats"), novo);
     id = r.key;
+    // registra localmente: o listener de /chats pode demorar e a conversa
+    // recém-criada era descartada antes de abrir.
+    MSG.chats[id] = { ...novo, id };
   }
   MSG.tab = "chat"; MSG.chatId = id; MSG._mounted = null;
   if (STATE.view !== "mensagens") { STATE.view = "mensagens"; renderView(); } else renderMensagensBody();
@@ -2995,16 +3009,19 @@ function newGroupForm() {
     if (!name) return toast("Informe o nome do grupo", "err");
     const members = { [STATE.user.uid]: true };
     Array.from($("#ng_users").selectedOptions).forEach(o => members[o.value] = true);
-    const r = await push(ref(db, "chats"), {
+    const grupo = {
       type: "group", name, members, createdBy: STATE.user.uid,
       createdAt: Date.now(), lastAt: Date.now(), lastText: ""
-    });
+    };
+    const r = await push(ref(db, "chats"), grupo);
+    MSG.chats[r.key] = { ...grupo, id: r.key };
     MSG.tab = "chat"; MSG.chatId = r.key; MSG._mounted = null; closeModal(); toast("Grupo criado", "ok"); renderMensagensBody();
   };
 }
 function openChat(chatId) {
   const c = MSG.chats[chatId]; const pane = $("#chatPane");
   if (!c || !pane) return;
+  const keepText = ($("#chatInput")?.value) || MSG._draftText?.[chatId] || "";
   MSG._mounted = chatId;
   MSG.msgs = {};
   const canSend = canChat() && !STATE.profile?.chatMuted;
@@ -3046,7 +3063,14 @@ function openChat(chatId) {
     MSG.msgs = snap.val() || {};
     drawChatMessages(chatId);
     refreshMsgBadge();
-    update(ref(db, "users/" + STATE.user.uid + "/chatSeen"), { [chatId]: Date.now() }).catch(() => {});
+    // Marca como lido APENAS quando existe mensagem mais nova que a última vista.
+    // Gravar sempre disparava o listener de /users e recriava a tela em loop.
+    const lastAt = Object.values(MSG.msgs).reduce((m, x) => Math.max(m, x?.at || 0), 0);
+    const seen = STATE.profile?.chatSeen?.[chatId] || 0;
+    if (lastAt && lastAt > seen && MSG._seenWrite?.[chatId] !== lastAt) {
+      (MSG._seenWrite ||= {})[chatId] = lastAt;
+      update(ref(db, "users/" + STATE.user.uid + "/chatSeen"), { [chatId]: lastAt }).catch(() => {});
+    }
   }, err => {
     got = true;
     const b = $("#chatBox");
@@ -3062,11 +3086,14 @@ function openChat(chatId) {
 
   const input = $("#chatInput");
   const form = $("#chatForm");
+  if (input && keepText) input.value = keepText;
+  if (input) input.oninput = () => { (MSG._draftText ||= {})[chatId] = input.value; };
   form.onsubmit = async ev => {
     ev.preventDefault();
     const text = input.value.trim();
     if (!text) { input.focus(); return; }
     input.value = "";
+    if (MSG._draftText) MSG._draftText[chatId] = "";
     input.focus(); // mantém o teclado aberto no celular
     try {
       await push(ref(db, "chatMessages/" + chatId), {
@@ -3075,7 +3102,8 @@ function openChat(chatId) {
       await update(ref(db, "chats/" + chatId), { lastAt: Date.now(), lastText: text.slice(0, 60), lastBy: STATE.user.uid });
     } catch (e) {
       input.value = text;
-      toast("Não foi possível enviar: " + e.message, "err");
+      (MSG._draftText ||= {})[chatId] = text;
+      toast("Não foi possível enviar: " + (e?.message || e), "err");
     }
   };
   if (input) {
