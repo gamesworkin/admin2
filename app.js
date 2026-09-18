@@ -318,6 +318,16 @@ function kitAvailable(kit) {
 /* Lucro de uma venda: o "frete a contratar" (s.freight) é repassado a terceiros e NÃO entra no lucro;
    a "nossa entrega" (s.ownFreight) é receita da empresa e entra no lucro. */
 function saleProfit(s) { return num(s.total) - num(s.cost) - num(s.freight); }
+/* Rateio do frete a contratar:
+   s.freight         = valor total pago ao terceiro que fez a entrega
+   s.freightCustomer = parte cobrada do cliente (entra no faturamento)
+   s.freightCompany  = parte bancada pela empresa (sai do lucro)
+   Vendas antigas nao possuem freightCustomer: nelas o cliente pagou o frete todo. */
+function saleFreightCustomer(s) {
+  const v = s?.freightCustomer;
+  return (v === undefined || v === null || v === "") ? num(s?.freight) : num(v);
+}
+function saleFreightCompany(s) { return num(s?.freight) - saleFreightCustomer(s); }
 function margin(p) {
   const price = num(p.promo) || num(p.price);
   const cost = num(p.avgCost);
@@ -1297,11 +1307,12 @@ function viewVendas(root) {
     const rev = rows.reduce((a, s) => a + num(s.total), 0);
     const cost = rows.reduce((a, s) => a + num(s.cost), 0);
     const fr3 = rows.reduce((a, s) => a + num(s.freight), 0);
+    const frEmp = rows.reduce((a, s) => a + saleFreightCompany(s), 0);
     const profit = rows.reduce((a, s) => a + saleProfit(s), 0);
     $("#vBody").innerHTML = `
       <div class="stats" style="margin-bottom:14px">
         ${stat("Faturamento do período", money(rev), rows.length + " venda(s)")}
-        ${stat("Custo das vendas", money(cost), fr3 ? "+ " + money(fr3) + " frete a contratar (terceiros)" : "")}
+        ${stat("Custo das vendas", money(cost), fr3 ? "+ " + money(fr3) + " frete a contratar" + (frEmp ? " · " + money(frEmp) + " bancado pela empresa" : "") : "")}
         ${stat("Lucro bruto", money(profit), rev > 0 ? pct(profit / rev * 100) : "")}
         ${stat("Ticket médio", money(rows.length ? rev / rows.length : 0), periodLabel(pid))}
       </div>
@@ -1311,7 +1322,7 @@ function viewVendas(root) {
       <td>${esc(s.payment || "—")}</td>
       <td>${s.settlement === "prazo" ? `<span class="pill warn">a receber</span>` : `<span class="pill ok">${esc(accName(s.accountId))}</span>`}</td>
       <td class="right">${money(s.cost)}</td>
-      <td class="right muted">${num(s.freight) ? "a contratar " + money(s.freight) : ""}${num(s.freight) && num(s.ownFreight) ? "<br>" : ""}${num(s.ownFreight) ? "nossa entrega " + money(s.ownFreight) : ""}${!num(s.freight) && !num(s.ownFreight) ? "—" : ""}</td>
+      <td class="right muted">${num(s.freight) ? `a contratar ${money(s.freight)}<br><span class="muted">cliente ${money(saleFreightCustomer(s))}${saleFreightCompany(s) ? ` · empresa ${money(saleFreightCompany(s))}` : ""}</span>` : ""}${num(s.freight) && num(s.ownFreight) ? "<br>" : ""}${num(s.ownFreight) ? "nossa entrega " + money(s.ownFreight) : ""}${!num(s.freight) && !num(s.ownFreight) ? "—" : ""}</td>
       <td class="right"><strong>${money(s.total)}</strong></td>
       <td class="right">${marginCell(saleProfit(s), num(s.total) > 0 ? (saleProfit(s)) / num(s.total) * 100 : 0, num(s.total) > 0)}</td>
       <td><button class="btn btn-sm" data-rcpt="${s.id}">Recibo</button>
@@ -1337,14 +1348,16 @@ function viewVendas(root) {
   $("#sNew").onclick = () => saleForm();
   $("#v_q").oninput = draw;
   $("#v_csv").onclick = () => downloadCsv(`vendas_${periodOf(pid).from || "tudo"}`,
-    [["Data", "Cliente", "Pagamento", "Recebimento", "Conta", "Itens", "Custo", "Frete a contratar", "Nossa entrega", "Total", "Lucro"],
+    [["Data", "Cliente", "Pagamento", "Recebimento", "Conta", "Itens", "Custo", "Frete a contratar (total)", "Frete pago pelo cliente", "Frete pago pela empresa", "Nossa entrega", "Total", "Lucro"],
     ...rows.map(s => [s.date, s.customer || "", s.payment || "", s.settlement || "", accName(s.accountId),
       (s.items || []).map(i => `${num(i.qty)}x ${i.name}`).join(" | "),
-      num(s.cost).toFixed(2), num(s.freight).toFixed(2), num(s.ownFreight).toFixed(2), num(s.total).toFixed(2), (saleProfit(s)).toFixed(2)])]);
+      num(s.cost).toFixed(2), num(s.freight).toFixed(2), saleFreightCustomer(s).toFixed(2), saleFreightCompany(s).toFixed(2),
+      num(s.ownFreight).toFixed(2), num(s.total).toFixed(2), (saleProfit(s)).toFixed(2)])]);
   $("#v_pdf").onclick = () => printHTML(`Vendas — ${periodLabel(pid)}`,
     kpiHTML([["Faturamento", money(rows.reduce((a, s) => a + num(s.total), 0))],
     ["Custo", money(rows.reduce((a, s) => a + num(s.cost), 0))],
     ["Frete a contratar (terceiros)", money(rows.reduce((a, s) => a + num(s.freight), 0))],
+    ["Frete bancado pela empresa", money(rows.reduce((a, s) => a + saleFreightCompany(s), 0))],
     ["Lucro bruto", money(rows.reduce((a, s) => a + saleProfit(s), 0))],
     ["Vendas", String(rows.length)]]) +
     tblHTML(["Data", "Cliente", "Pagamento", "Custo", "Total", "Lucro"],
@@ -1369,7 +1382,9 @@ function saleForm(id) {
       <label class="field"><span>Forma de pagamento</span><select id="s_pay">
         <option>Dinheiro</option><option>PIX</option><option>Débito</option><option>Crédito</option><option>Boleto</option><option>A prazo</option></select></label>
       <label class="field"><span>Desconto (R$)</span><input id="s_disc" type="number" step="0.01" value="${num(editing?.discount)}"></label>
-      <label class="field"><span>Frete a contratar (R$) <small class="muted">— pago a terceiros, não entra no lucro</small></span><input id="s_freight" type="number" step="0.01" value="${num(editing?.freight)}"></label>
+      <label class="field"><span>Frete a contratar (R$) <small class="muted">— total pago ao terceiro que entrega</small></span><input id="s_freight" type="number" step="0.01" value="${num(editing?.freight)}"></label>
+      <label class="field"><span>↳ Pago pelo cliente (R$) <small class="muted">— cobrado na venda, entra no faturamento</small></span><input id="s_frCli" type="number" step="0.01" value="${editing ? saleFreightCustomer(editing) : 0}"></label>
+      <label class="field"><span>↳ Pago pela empresa (R$) <small class="muted">— diferença, descontada do lucro</small></span><input id="s_frEmp" type="number" step="0.01" value="0" readonly tabindex="-1"></label>
       <label class="field"><span>Nossa entrega (R$) <small class="muted">— frete por conta da empresa, entra no lucro</small></span><input id="s_own" type="number" step="0.01" value="${num(editing?.ownFreight)}"></label>
       <label class="field"><span>Recebimento</span><select id="s_rec">
         <option value="imediato">À vista — credita no saldo agora</option>
@@ -1418,11 +1433,13 @@ function saleForm(id) {
     const sub = items.reduce((s, i) => s + num(i.price) * num(i.qty), 0);
     const cost = items.reduce((s, i) => s + num(i.cost) * num(i.qty), 0);
     const fr3 = num($("#s_freight").value), own = num($("#s_own").value);
-    const base = sub - num($("#s_disc").value) + fr3 + own;
+    const frCli = num($("#s_frCli").value), frEmp = fr3 - frCli;
+    $("#s_frEmp").value = frEmp.toFixed(2);
+    const base = sub - num($("#s_disc").value) + frCli + own;
     const rate = num($("#s_juros").value);
     const total = withRate(base, rate);
     $("#s_total").textContent = money(total);
-    $("#s_info").textContent = `Custo ${money(cost)}${fr3 ? ` · Frete a contratar ${money(fr3)} (repasse a terceiros)` : ""}${own ? ` · Nossa entrega ${money(own)}` : ""} · Lucro estimado ${money(total - cost - fr3)}`
+    $("#s_info").textContent = `Custo ${money(cost)}${fr3 ? ` · Frete a contratar ${money(fr3)} (cliente ${money(frCli)}${frEmp > 0 ? ` · empresa ${money(frEmp)} do lucro` : frEmp < 0 ? ` · sobra ${money(-frEmp)} para a empresa` : ""})` : ""}${own ? ` · Nossa entrega ${money(own)}` : ""} · Lucro estimado ${money(total - cost - fr3)}`
       + (rate ? ` · ${rate > 0 ? "juros" : "desconto"} de cartão ${pct(Math.abs(rate))} (${money(total - base)})` : "");
     saleInstPreview(total);
   };
@@ -1447,14 +1464,23 @@ function saleForm(id) {
         : "As parcelas ficam em aberto no Contas a receber para quitação manual."}</div></div>`
       : `<div class="muted">Adicione itens para simular as parcelas.</div>`;
   };
-  ["s_disc", "s_freight", "s_own", "s_juros"].forEach(i => $("#" + i).oninput = draw);
+  ["s_disc", "s_own", "s_juros"].forEach(i => $("#" + i).oninput = draw);
+  $("#s_freight").oninput = () => {
+    // por padrão o cliente paga o frete inteiro; se o valor cobrado dele já foi ajustado à mão, respeita
+    if (!$("#s_frCli").dataset.touched) $("#s_frCli").value = num($("#s_freight").value).toFixed(2);
+    draw();
+  };
+  $("#s_frCli").oninput = () => { $("#s_frCli").dataset.touched = "1"; draw(); };
+  if (editing && num(editing.freight)) $("#s_frCli").dataset.touched = "1";
   const currentSaleData = () => {
     const sub = items.reduce((s, i) => s + num(i.price) * num(i.qty), 0);
     const cardRate = num($("#s_juros").value);
-    const total = withRate(sub - num($("#s_disc").value) + num($("#s_freight").value) + num($("#s_own").value), cardRate);
+    const frTot = num($("#s_freight").value), frCli = num($("#s_frCli").value);
+    const total = withRate(sub - num($("#s_disc").value) + frCli + num($("#s_own").value), cardRate);
     return {
       id: editing?.id || "", customer: $("#s_customer").value.trim(), date: $("#s_date").value || todayISO(),
-      payment: $("#s_pay").value, discount: num($("#s_disc").value), freight: num($("#s_freight").value), ownFreight: num($("#s_own").value),
+      payment: $("#s_pay").value, discount: num($("#s_disc").value), freight: frTot,
+      freightCustomer: frCli, freightCompany: frTot - frCli, ownFreight: num($("#s_own").value),
       cardRate, items, subtotal: sub, total, settlement: $("#s_rec").value,
       installments: $("#s_rec").value === "prazo" ? (parseInt($("#s_inst").value) || 1) : 1,
       firstDue: $("#s_first").value, createdAt: editing?.createdAt || Date.now(), user: editing?.user || STATE.user?.email
@@ -1478,7 +1504,8 @@ function saleForm(id) {
     const sub = items.reduce((s, i) => s + num(i.price) * num(i.qty), 0);
     const cost = items.reduce((s, i) => s + num(i.cost) * num(i.qty), 0);
     const cardRate = num($("#s_juros").value);
-    const total = withRate(sub - num($("#s_disc").value) + num($("#s_freight").value) + num($("#s_own").value), cardRate);
+    const frTot = num($("#s_freight").value), frCli = num($("#s_frCli").value);
+    const total = withRate(sub - num($("#s_disc").value) + frCli + num($("#s_own").value), cardRate);
     if (editing) {
       const linked = list(STATE.receivables).filter(r => r.refKind === "sale" && r.refId === id);
       if (linked.some(r => r.status === "recebido"))
@@ -1504,7 +1531,9 @@ function saleForm(id) {
     const sale = {
       customer: $("#s_customer").value.trim(), date: $("#s_date").value || todayISO(),
       payment: $("#s_pay").value, discount: num($("#s_disc").value),
-      freight: num($("#s_freight").value),      // frete a contratar — repassado a terceiros (não entra no lucro)
+      freight: frTot,                           // frete a contratar — total pago ao terceiro
+      freightCustomer: frCli,                   // parte cobrada do cliente — entra no faturamento
+      freightCompany: frTot - frCli,            // parte bancada pela empresa — sai do lucro
       ownFreight: num($("#s_own").value),       // nossa entrega — receita da empresa (entra no lucro)
       cardRate, items, subtotal: sub, cost, total,
       settlement, accountId: settlement === "imediato" ? accId : "",
@@ -1574,7 +1603,7 @@ function printReceipt(sale) {
   const dateTime = when.toLocaleDateString("pt-BR") + " às " + when.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
   const items = sale.items || [];
   const sub = num(sale.subtotal) || items.reduce((s, i) => s + num(i.price) * num(i.qty), 0);
-  const disc = num(sale.discount), fr3 = num(sale.freight), own = num(sale.ownFreight), rate = num(sale.cardRate);
+  const disc = num(sale.discount), fr3 = saleFreightCustomer(sale), own = num(sale.ownFreight), rate = num(sale.cardRate);
   const base = sub - disc + fr3 + own;
   const rateVal = withRate(base, rate) - base;
   const n = Math.max(1, num(sale.installments) || 1);
@@ -1611,7 +1640,7 @@ th,td{border-bottom:1px solid #ddd;padding:7px 6px;text-align:left;vertical-alig
 <table><tbody>
 ${row("Subtotal dos itens", money(sub))}
 ${disc ? row("Desconto", "- " + money(disc)) : ""}
-${fr3 ? row("Frete a contratar (transportadora / terceiros)", money(fr3)) : ""}
+${fr3 ? row("Frete (entrega por transportadora / terceiros)", money(fr3)) : ""}
 ${own ? row("Entrega (" + esc(st.companyName || "nossa entrega") + ")", money(own)) : ""}
 ${rate ? row((rate > 0 ? "Juros" : "Desconto") + " cartão de crédito (" + pct(Math.abs(rate)) + ")", (rateVal >= 0 ? "" : "- ") + money(Math.abs(rateVal))) : ""}
 <tr class="tot">${row("TOTAL", money(sale.total), true).slice(4)}
@@ -2345,7 +2374,8 @@ function viewRelatorios(root) {
     const buys = list(STATE.entries).filter(e => inRange(e.date, from, to));
     const rev = sales.reduce((s, v) => s + num(v.total), 0);
     const cost = sales.reduce((s, v) => s + num(v.cost), 0);
-    const fr3 = sales.reduce((s, v) => s + num(v.freight), 0); // frete a contratar — repasse a terceiros
+    const fr3 = sales.reduce((s, v) => s + num(v.freight), 0); // frete a contratar — total pago a terceiros
+    const frEmp = sales.reduce((s, v) => s + saleFreightCompany(v), 0); // parte bancada pela empresa
     const profit = sales.reduce((s, v) => s + saleProfit(v), 0);
     const expT = exps.reduce((s, v) => s + num(v.amount), 0);
     const buyT = buys.reduce((s, v) => s + num(v.total), 0);
@@ -2371,7 +2401,7 @@ function viewRelatorios(root) {
     <div class="stats">
       ${stat("Faturamento", money(rev), sales.length + " venda(s)")}
       ${stat("Custo das vendas", money(cost))}
-      ${stat("Frete a contratar (terceiros)", money(fr3), "repasse · não entra no lucro")}
+      ${stat("Frete a contratar (terceiros)", money(fr3), frEmp ? money(frEmp) + " bancado pela empresa (sai do lucro)" : "repasse · não entra no lucro")}
       ${stat("Lucro bruto", money(profit))}
       ${stat("Despesas", money(expT))}
       ${stat("Compras de mercadoria", money(buyT))}
